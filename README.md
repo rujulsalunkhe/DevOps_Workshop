@@ -145,25 +145,45 @@ The pipeline triggers on push to main branch:
 ## 📁 Project Structure
 
 devops-pipeline-project/
+|
 ├── .github/workflows/deploy.yml # CI/CD pipeline
+|
 ├── terraform/ # Infrastructure as Code
+|
 │ ├── main.tf
+| |
 │ ├── variables.tf
+| |
 │ └── outputs.tf
+|
 ├── tests/ # Test files
+| |
 │ ├── test_app.py
+| |
 │ └── test_integration.py
+|
 ├── app/ # Application modules
+| |
 │ ├── init.py
+| |
 │ ├── models.py
+| |
 │ ├── config.py
+| |
 │ └── utils.py
+|
 ├── app.py # Main Flask application
+|
 ├── requirements.txt # Python dependencies
+|
 ├── docker-compose.yml # LocalStack configuration
+|
 ├── Dockerfile # Container configuration
+|
 ├── .gitignore # Git ignore rules
+|
 ├── .env.example # Environment template
+|
 └── README.md # This file
 
 ## 🐛 Troubleshooting
