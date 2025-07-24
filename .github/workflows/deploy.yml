@@ -1,0 +1,187 @@
+name: Deploy Flask API to LocalStack
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python environment
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+
+      - name: Install dependencies
+        run: |
+          source venv/bin/activate
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests
+        run: |
+          source venv/bin/activate
+          pytest tests/ -v --cov=app --cov-report=term-missing
+
+      - name: Check code quality
+        run: |
+          source venv/bin/activate
+          pip install flake8
+          flake8 app.py app/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  deploy:
+    needs: test
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Start LocalStack
+        run: |
+          docker-compose up -d localstack
+          sleep 30
+
+      - name: Wait for LocalStack to be ready
+        run: |
+          timeout 60 bash -c 'until curl -f http://localhost:4566/_localstack/health; do sleep 2; done'
+
+      - name: Set up Python environment
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create Lambda handler
+        run: |
+          cat > lambda_handler.py << 'EOF'
+          import json
+          from app import app
+
+          def lambda_handler(event, context):
+              try:
+                  from werkzeug.serving import run_simple
+                  from werkzeug.wrappers import Request, Response
+                  
+                  # Create WSGI environ from Lambda event
+                  environ = {
+                      'REQUEST_METHOD': event.get('httpMethod', 'GET'),
+                      'PATH_INFO': event.get('path', '/'),
+                      'QUERY_STRING': event.get('queryStringParameters', ''),
+                      'CONTENT_TYPE': event.get('headers', {}).get('Content-Type', ''),
+                      'CONTENT_LENGTH': str(len(event.get('body', ''))),
+                      'SERVER_NAME': 'localhost',
+                      'SERVER_PORT': '80',
+                      'wsgi.input': None,
+                      'wsgi.errors': None,
+                      'wsgi.version': (1, 0),
+                      'wsgi.multithread': False,
+                      'wsgi.multiprocess': True,
+                      'wsgi.run_once': False,
+                      'wsgi.url_scheme': 'http',
+                  }
+                  
+                  # Add headers to environ
+                  for key, value in event.get('headers', {}).items():
+                      key = key.upper().replace('-', '_')
+                      if key not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+                          key = f'HTTP_{key}'
+                      environ[key] = value
+                  
+                  # Handle request body
+                  if event.get('body'):
+                      from io import StringIO
+                      environ['wsgi.input'] = StringIO(event['body'])
+                  
+                  # Create response
+                  response_data = []
+                  
+                  def start_response(status, headers):
+                      response_data.append(status)
+                      response_data.append(headers)
+                  
+                  # Call Flask app
+                  with app.app_context():
+                      app_response = app.wsgi_app(environ, start_response)
+                      body = b''.join(app_response).decode('utf-8')
+                  
+                  return {
+                      'statusCode': int(response_data[0].split()[0]),
+                      'headers': dict(response_data[1]),
+                      'body': body
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+          EOF
+
+      - name: Package Lambda function
+        run: |
+          source venv/bin/activate
+
+          # Create deployment directory
+          mkdir -p lambda-package
+
+          # Copy application files
+          cp -r app lambda-package/
+          cp app.py lambda-package/
+          cp lambda_handler.py lambda-package/
+
+          # Install dependencies
+          pip install -r requirements.txt -t lambda-package/
+
+          # Create zip file
+          cd lambda-package
+          zip -r ../lambda-deployment.zip .
+          cd ..
+
+          echo "Lambda package created: $(ls -lh lambda-deployment.zip)"
+
+      - name: Initialize Terraform
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Plan Terraform deployment
+        run: |
+          cd terraform
+          terraform plan -var="lambda_zip_path=../lambda-deployment.zip"
+
+      - name: Apply Terraform configuration
+        run: |
+          cd terraform
+          terraform apply -auto-approve -var="lambda_zip_path=../lambda-deployment.zip"
+
+      - name: Test deployed API
+        run: |
+          sleep 10
+
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f http://localhost:4566/restapis/*/prod/_user_request_/health || exit 1
+
+          # Test main endpoint
+          echo "Testing main endpoint..."
+          curl -f http://localhost:4566/restapis/*/prod/_user_request_/ || exit 1
+
+          echo "Deployment successful!"
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          cd terraform
+          terraform destroy -auto-approve -var="lambda_zip_path=../lambda-deployment.zip" || true
+          docker-compose down || true

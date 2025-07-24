@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack-devops
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=lambda,apigateway,s3,iam,logs,cloudformation
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - HOST_TMP_FOLDER=${TMPDIR:-/tmp/}localstack
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${TMPDIR:-/tmp}/localstack:/tmp/localstack"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  app:
+    build: .
+    container_name: flask-app
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_PATH=/app/data/data.db
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      localstack:
+        condition: service_healthy
